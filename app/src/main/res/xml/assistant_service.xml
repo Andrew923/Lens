@@ -1,0 +1,5 @@
+<voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sessionService="com.andrew.lens.LensSessionService"
+    android:recognitionService="com.andrew.lens.LensRecognitionService"
+    android:supportsAssist="true"
+    android:supportsLocalInteraction="true" />

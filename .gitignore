@@ -1,0 +1,23 @@
+# Gradle / build
+.gradle/
+build/
+app/build/
+
+# Local Gradle distribution (not part of source)
+gradle-8.5/
+gradle-8.5-bin.zip
+
+# Android / IDE
+local.properties
+*.iml
+.idea/
+.cxx/
+captures/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Keystores / secrets
+*.jks
+*.keystore
