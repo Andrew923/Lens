@@ -37,11 +37,15 @@ public class OcrScanner {
 
     /**
      * Scan a bitmap for text using OCR.
+     *
+     * Returned {@link TextRegion} bounds are in raw screenshot-bitmap pixel
+     * space (origin = top-left of the captured bitmap). Mapping into view
+     * space is the responsibility of the view layer.
+     *
      * @param bitmap The screenshot to scan
-     * @param yOffset Offset to add to Y coordinates (e.g., status bar height)
      * @param callback Callback for results
      */
-    public void scanBitmap(Bitmap bitmap, int yOffset, OcrCallback callback) {
+    public void scanBitmap(Bitmap bitmap, OcrCallback callback) {
         if (bitmap == null) {
             callback.onOcrComplete(new ArrayList<>());
             return;
@@ -51,7 +55,7 @@ public class OcrScanner {
 
         chineseRecognizer.process(image)
                 .addOnSuccessListener(text -> {
-                    List<TextRegion> regions = convertToTextRegions(text, yOffset);
+                    List<TextRegion> regions = convertToTextRegions(text);
                     callback.onOcrComplete(regions);
                 })
                 .addOnFailureListener(e -> {
@@ -59,9 +63,8 @@ public class OcrScanner {
                 });
     }
 
-    private List<TextRegion> convertToTextRegions(Text text, int yOffset) {
+    private List<TextRegion> convertToTextRegions(Text text) {
         List<TextRegion> regions = new ArrayList<>();
-        Log.d(TAG, "Converting OCR results with yOffset=" + yOffset);
 
         for (Text.TextBlock block : text.getTextBlocks()) {
             for (Text.Line line : block.getLines()) {
@@ -106,17 +109,9 @@ public class OcrScanner {
                     continue;
                 }
 
-                // Apply Y offset for status bar
-                Rect adjustedBounds = new Rect(
-                        bounds.left,
-                        bounds.top + yOffset,
-                        bounds.right,
-                        bounds.bottom + yOffset
-                );
+                Log.d(TAG, "OCR: '" + lineText.substring(0, Math.min(20, lineText.length())) + "' y=" + bounds.top);
 
-                Log.d(TAG, "OCR: '" + lineText.substring(0, Math.min(20, lineText.length())) + "' raw_y=" + bounds.top + " adjusted_y=" + adjustedBounds.top);
-
-                TextRegion region = new TextRegion(lineText, adjustedBounds, "OCR");
+                TextRegion region = new TextRegion(lineText, new Rect(bounds), "OCR");
                 regions.add(region);
             }
         }

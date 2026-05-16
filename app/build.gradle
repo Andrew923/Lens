@@ -19,4 +19,10 @@ dependencies {
     // ML Kit Text Recognition (on-device)
     implementation 'com.google.mlkit:text-recognition:16.0.0'
     implementation 'com.google.mlkit:text-recognition-chinese:16.0.0'
+
+    // Swipeable pager (used without Fragments via a plain RecyclerView.Adapter).
+    // Versions pinned for AGP 8.2 / compileSdk 34 compatibility.
+    implementation 'androidx.viewpager2:viewpager2:1.0.0'
+    implementation 'androidx.recyclerview:recyclerview:1.3.2'
+    implementation 'androidx.core:core:1.12.0'
 }

@@ -1,10 +1,10 @@
 package com.andrew.lens;
 
-import android.content.ClipData;
-import android.content.ClipboardManager;
 import android.content.Context;
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.RectF;
@@ -12,25 +12,44 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.widget.FrameLayout;
 import android.widget.TextView;
-import android.widget.Toast;
 
 import java.util.ArrayList;
 import java.util.List;
 
-public class LensOverlayView extends FrameLayout {
+/**
+ * Screen 1 of the Lens pager: the frozen-screenshot translation view.
+ *
+ * Draws the captured screenshot as a static background and paints OCR boxes
+ * + pinyin on top of it. All OCR coordinates are in raw screenshot-bitmap
+ * pixel space; this view owns the single bitmap-&gt;view transform (a
+ * letterboxed fit), so boxes align 1:1 with the frozen image regardless of
+ * keyboard / IME / status-bar state on the live screen.
+ *
+ * Tapping a Chinese word shows a {@link DefinitionPopupView}.
+ */
+public class TranslateScreenView extends FrameLayout {
 
-    private static final int OVERLAY_COLOR = 0x80000000; // Semi-transparent black
-    private static final int TEXT_BOX_COLOR = 0x4000FF00; // Semi-transparent green
-    private static final int TEXT_BOX_SELECTED_COLOR = 0x8000FF00; // More opaque green
-    private static final int TEXT_BOX_STROKE_COLOR = 0xFF00FF00; // Solid green stroke
-    private static final int CHINESE_BOX_COLOR = 0x40FFAA00; // Semi-transparent orange for Chinese
-    private static final int CHINESE_BOX_STROKE_COLOR = 0xFFFFAA00; // Orange stroke for Chinese
-    private static final int OCR_BOX_COLOR = 0x4000AAFF; // Semi-transparent cyan for OCR
-    private static final int OCR_BOX_STROKE_COLOR = 0xFF00AAFF; // Cyan stroke for OCR
+    private static final int DIM_COLOR = 0x66000000; // light dim over screenshot for contrast
+    private static final int TEXT_BOX_SELECTED_COLOR = 0x8000FF00;
+    private static final int CHINESE_BOX_COLOR = 0x40FFAA00;
+    private static final int CHINESE_BOX_STROKE_COLOR = 0xFFFFAA00;
+    private static final int OCR_BOX_COLOR = 0x4000AAFF;
+    private static final int OCR_BOX_STROKE_COLOR = 0xFF00AAFF;
+
+    private static final int PINYIN_MARGIN = 4;
+    private static final int TAP_SLOP = 24; // px of movement still treated as a tap
 
     private List<TextRegion> textRegions = new ArrayList<>();
-    private Paint boxPaint;
-    private Paint strokePaint;
+    private Bitmap screenshot;
+
+    // bitmap -> view transform (letterbox fit), recomputed on size/bitmap change
+    private final Matrix bmpToView = new Matrix();
+    private float scale = 1f;
+    private float dx = 0f;
+    private float dy = 0f;
+
+    private Paint bitmapPaint;
+    private Paint dimPaint;
     private Paint selectedPaint;
     private Paint chineseBoxPaint;
     private Paint chineseStrokePaint;
@@ -38,40 +57,31 @@ public class LensOverlayView extends FrameLayout {
     private Paint ocrStrokePaint;
     private Paint pinyinPaint;
     private Paint pinyinBackgroundPaint;
+
     private TextView statusText;
-    private OnDismissListener dismissListener;
     private DefinitionPopupView definitionPopup;
 
-    private static final int PINYIN_MARGIN = 4;
+    private boolean pinyinToneMarks = true;
+    private boolean dimEnabled = true;
 
-    public interface OnDismissListener {
-        void onDismiss();
-    }
+    private float downX, downY;
 
-    public LensOverlayView(Context context) {
+    public TranslateScreenView(Context context) {
         super(context);
         init();
     }
 
     private void init() {
-        // Set semi-transparent background
-        setBackgroundColor(OVERLAY_COLOR);
+        bitmapPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
 
-        // Initialize paints for non-Chinese text
-        boxPaint = new Paint();
-        boxPaint.setColor(TEXT_BOX_COLOR);
-        boxPaint.setStyle(Paint.Style.FILL);
-
-        strokePaint = new Paint();
-        strokePaint.setColor(TEXT_BOX_STROKE_COLOR);
-        strokePaint.setStyle(Paint.Style.STROKE);
-        strokePaint.setStrokeWidth(3f);
+        dimPaint = new Paint();
+        dimPaint.setColor(DIM_COLOR);
+        dimPaint.setStyle(Paint.Style.FILL);
 
         selectedPaint = new Paint();
         selectedPaint.setColor(TEXT_BOX_SELECTED_COLOR);
         selectedPaint.setStyle(Paint.Style.FILL);
 
-        // Initialize paints for Chinese text (orange to distinguish)
         chineseBoxPaint = new Paint();
         chineseBoxPaint.setColor(CHINESE_BOX_COLOR);
         chineseBoxPaint.setStyle(Paint.Style.FILL);
@@ -81,7 +91,6 @@ public class LensOverlayView extends FrameLayout {
         chineseStrokePaint.setStyle(Paint.Style.STROKE);
         chineseStrokePaint.setStrokeWidth(3f);
 
-        // Initialize paints for OCR text (cyan to distinguish)
         ocrBoxPaint = new Paint();
         ocrBoxPaint.setColor(OCR_BOX_COLOR);
         ocrBoxPaint.setStyle(Paint.Style.FILL);
@@ -91,7 +100,6 @@ public class LensOverlayView extends FrameLayout {
         ocrStrokePaint.setStyle(Paint.Style.STROKE);
         ocrStrokePaint.setStrokeWidth(3f);
 
-        // Initialize paints for pinyin
         pinyinPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         pinyinPaint.setColor(Color.WHITE);
         pinyinPaint.setTextAlign(Paint.Align.CENTER);
@@ -100,44 +108,40 @@ public class LensOverlayView extends FrameLayout {
         pinyinBackgroundPaint.setColor(0xDD333333);
         pinyinBackgroundPaint.setStyle(Paint.Style.FILL);
 
-        // Add status indicator at top
         statusText = new TextView(getContext());
-        statusText.setText("LENS ACTIVE");
+        statusText.setText("LENS - Scanning...");
         statusText.setTextColor(Color.WHITE);
-        statusText.setTextSize(18);
-        statusText.setPadding(32, 16, 32, 16);
+        statusText.setTextSize(14);
+        statusText.setPadding(24, 8, 24, 8);
         statusText.setBackgroundColor(0xCC000000);
-
         LayoutParams statusParams = new LayoutParams(
-                LayoutParams.WRAP_CONTENT,
-                LayoutParams.WRAP_CONTENT
-        );
+                LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
         statusParams.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
-        statusParams.topMargin = 100;
+        statusParams.topMargin = 8;
         addView(statusText, statusParams);
 
-        // Add definition popup (initially hidden)
         definitionPopup = new DefinitionPopupView(getContext());
         definitionPopup.setVisibility(GONE);
         definitionPopup.setOnDismissListener(() -> {
-            // Deselect all when popup closes
             for (TextRegion r : textRegions) {
                 r.isSelected = false;
             }
             invalidate();
         });
-        LayoutParams popupParams = new LayoutParams(
-                LayoutParams.WRAP_CONTENT,
-                LayoutParams.WRAP_CONTENT
-        );
-        addView(definitionPopup, popupParams);
+        addView(definitionPopup, new LayoutParams(
+                LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT));
 
-        // Enable drawing
+        pinyinToneMarks = Prefs.pinyinToneMarks(getContext());
+        dimEnabled = Prefs.dimScreenshot(getContext());
+
         setWillNotDraw(false);
     }
 
-    public void setOnDismissListener(OnDismissListener listener) {
-        this.dismissListener = listener;
+    /** Set the frozen screenshot to draw as the background. */
+    public void setScreenshot(Bitmap bitmap) {
+        this.screenshot = bitmap;
+        recomputeTransform();
+        invalidate();
     }
 
     public void showLoading() {
@@ -153,6 +157,9 @@ public class LensOverlayView extends FrameLayout {
     }
 
     public void displayTextRegions(List<TextRegion> regions) {
+        pinyinToneMarks = Prefs.pinyinToneMarks(getContext());
+        dimEnabled = Prefs.dimScreenshot(getContext());
+
         if (regions == null || regions.isEmpty()) {
             statusText.setText("LENS - No text found");
             this.textRegions = new ArrayList<>();
@@ -162,12 +169,10 @@ public class LensOverlayView extends FrameLayout {
 
         this.textRegions = regions;
 
-        // Count Chinese regions
         int chineseCount = 0;
         for (TextRegion r : regions) {
             if (r.containsChinese) chineseCount++;
         }
-
         if (chineseCount > 0) {
             statusText.setText("LENS - " + regions.size() + " regions (" + chineseCount + " Chinese)");
         } else {
@@ -177,31 +182,67 @@ public class LensOverlayView extends FrameLayout {
     }
 
     @Override
+    protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+        super.onSizeChanged(w, h, oldw, oldh);
+        recomputeTransform();
+    }
+
+    /** Compute the aspect-preserving (letterbox) bitmap -&gt; view transform. */
+    private void recomputeTransform() {
+        if (screenshot == null || screenshot.isRecycled()
+                || getWidth() == 0 || getHeight() == 0) {
+            return;
+        }
+        float bmpW = screenshot.getWidth();
+        float bmpH = screenshot.getHeight();
+        scale = Math.min(getWidth() / bmpW, getHeight() / bmpH);
+        float drawW = bmpW * scale;
+        dx = (getWidth() - drawW) / 2f;
+        dy = 0f; // top-align so reading order matches
+        bmpToView.reset();
+        bmpToView.setScale(scale, scale);
+        bmpToView.postTranslate(dx, dy);
+    }
+
+    private RectF mapToView(Rect bmpRect) {
+        RectF r = new RectF(bmpRect);
+        bmpToView.mapRect(r);
+        return r;
+    }
+
+    @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
 
+        if (screenshot != null && !screenshot.isRecycled()) {
+            canvas.drawBitmap(screenshot, bmpToView, bitmapPaint);
+            // Dim only the rendered image area for annotation contrast.
+            if (dimEnabled) {
+                canvas.drawRect(dx, dy,
+                        dx + screenshot.getWidth() * scale,
+                        dy + screenshot.getHeight() * scale,
+                        dimPaint);
+            }
+        }
+
         for (TextRegion region : textRegions) {
-            RectF rectF = new RectF(region.bounds);
+            RectF rectF = mapToView(region.bounds);
 
             if (region.containsChinese) {
-                // Draw Chinese text box (orange)
                 if (region.isSelected) {
                     canvas.drawRoundRect(rectF, 8, 8, selectedPaint);
                 } else {
                     canvas.drawRoundRect(rectF, 8, 8, chineseBoxPaint);
                 }
                 canvas.drawRoundRect(rectF, 8, 8, chineseStrokePaint);
-
-                // Draw pinyin annotations above Chinese text
                 drawPinyinAnnotations(canvas, region);
             } else {
-                // Draw regular text box (green)
                 if (region.isSelected) {
                     canvas.drawRoundRect(rectF, 8, 8, selectedPaint);
                 } else {
-                    canvas.drawRoundRect(rectF, 8, 8, boxPaint);
+                    canvas.drawRoundRect(rectF, 8, 8, ocrBoxPaint);
                 }
-                canvas.drawRoundRect(rectF, 8, 8, strokePaint);
+                canvas.drawRoundRect(rectF, 8, 8, ocrStrokePaint);
             }
         }
     }
@@ -211,28 +252,25 @@ public class LensOverlayView extends FrameLayout {
             return;
         }
 
-        // Calculate pinyin size based on text height
-        float pinyinSize = calculatePinyinSize(region);
+        float pinyinSize = calculatePinyinSize(region) * scale;
         pinyinPaint.setTextSize(pinyinSize);
 
         int charIndex = 0;
         for (SegmentedWord word : region.segmentedWords) {
             if (word.entry != null && word.text.length() > 0) {
-                // Get bounds for this word
                 Rect wordBounds = CharacterBoundsCalculator.getWordBounds(
                         region.characterBounds,
                         charIndex,
-                        charIndex + word.text.length()
-                );
+                        charIndex + word.text.length());
 
                 if (wordBounds != null) {
-                    String pinyin = word.entry.pinyinDisplay;
+                    RectF vw = mapToView(wordBounds);
+                    String pinyin = pinyinToneMarks
+                            ? word.entry.pinyinDisplay : word.entry.pinyin;
 
-                    // Calculate position (centered above word)
-                    float centerX = wordBounds.centerX();
-                    float y = wordBounds.top - PINYIN_MARGIN;
+                    float centerX = vw.centerX();
+                    float y = vw.top - PINYIN_MARGIN;
 
-                    // Draw background for readability
                     float pinyinWidth = pinyinPaint.measureText(pinyin);
                     float bgLeft = centerX - pinyinWidth / 2 - 4;
                     float bgRight = centerX + pinyinWidth / 2 + 4;
@@ -241,86 +279,84 @@ public class LensOverlayView extends FrameLayout {
 
                     canvas.drawRoundRect(bgLeft, bgTop, bgRight, bgBottom,
                             4, 4, pinyinBackgroundPaint);
-
-                    // Draw pinyin text
                     canvas.drawText(pinyin, centerX, y, pinyinPaint);
                 }
             }
-
             charIndex += word.text.length();
         }
     }
 
     private float calculatePinyinSize(TextRegion region) {
-        // Pinyin should be about 40% of character height, with min/max limits
+        // Pinyin ~40% of character height (in bitmap space; scaled by caller).
         float charHeight = region.bounds.height();
         return Math.max(14f, Math.min(charHeight * 0.4f, 28f));
     }
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
-        if (event.getAction() == MotionEvent.ACTION_UP) {
-            float x = event.getX();
-            float y = event.getY();
-
-            // If popup is showing and tap is outside it, dismiss popup
-            if (definitionPopup.isShowing()) {
-                definitionPopup.dismiss();
+        switch (event.getAction()) {
+            case MotionEvent.ACTION_DOWN:
+                downX = event.getX();
+                downY = event.getY();
                 return true;
-            }
-
-            // Check if tap is on any text region
-            TextRegion tappedRegion = null;
-            for (TextRegion region : textRegions) {
-                if (region.bounds.contains((int) x, (int) y)) {
-                    tappedRegion = region;
-                    break;
+            case MotionEvent.ACTION_UP:
+                float x = event.getX();
+                float y = event.getY();
+                // Treat as a tap only if the pointer barely moved; otherwise
+                // it was a swipe that ViewPager2 handles (or a cancelled drag).
+                if (Math.abs(x - downX) > TAP_SLOP || Math.abs(y - downY) > TAP_SLOP) {
+                    return true;
                 }
-            }
-
-            if (tappedRegion != null) {
-                handleTextRegionTap(tappedRegion, (int) x, (int) y);
-            } else {
-                // Tap outside text regions - dismiss
-                if (dismissListener != null) {
-                    dismissListener.onDismiss();
-                }
-            }
-
-            return true;
-        }
-        return true;
-    }
-
-    private void handleTextRegionTap(TextRegion region, int tapX, int tapY) {
-        if (region.containsChinese) {
-            handleChineseTextTap(region, tapX, tapY);
-        } else {
-            handleRegularTextTap(region);
+                handleTap(x, y);
+                return true;
+            default:
+                return true;
         }
     }
 
-    private void handleChineseTextTap(TextRegion region, int tapX, int tapY) {
-        // Find which word was tapped based on character bounds
-        SegmentedWord tappedWord = findTappedWord(region, tapX);
+    private void handleTap(float viewX, float viewY) {
+        if (definitionPopup.isShowing()) {
+            definitionPopup.dismiss();
+            return;
+        }
 
+        // Convert the touch point into bitmap space for hit-testing.
+        if (scale == 0f) return;
+        int bmpX = Math.round((viewX - dx) / scale);
+        int bmpY = Math.round((viewY - dy) / scale);
+
+        TextRegion tappedRegion = null;
+        for (TextRegion region : textRegions) {
+            if (region.bounds.contains(bmpX, bmpY)) {
+                tappedRegion = region;
+                break;
+            }
+        }
+
+        if (tappedRegion != null && tappedRegion.containsChinese) {
+            handleChineseTextTap(tappedRegion, bmpX);
+        }
+        // Tapping empty space no longer dismisses; use the header ✕ to close.
+    }
+
+    private void handleChineseTextTap(TextRegion region, int bmpX) {
+        SegmentedWord tappedWord = findTappedWord(region, bmpX);
         if (tappedWord != null && tappedWord.entry != null) {
-            // Show definition popup for this word
-            showDefinitionPopup(tappedWord.entry, tapX, region.bounds.top);
+            // Position popup in view space: centered over the tapped word,
+            // anchored above the region.
+            RectF regionView = mapToView(region.bounds);
+            int popupX = Math.round((bmpX * scale) + dx);
+            showDefinitionPopup(tappedWord.entry, popupX, Math.round(regionView.top));
 
-            // Select this region
             for (TextRegion r : textRegions) {
                 r.isSelected = false;
             }
             region.isSelected = true;
             invalidate();
-        } else {
-            // No definition available - fall back to copy behavior
-            handleRegularTextTap(region);
         }
     }
 
-    private SegmentedWord findTappedWord(TextRegion region, int tapX) {
+    private SegmentedWord findTappedWord(TextRegion region, int bmpX) {
         if (region.segmentedWords == null || region.characterBounds == null) {
             return null;
         }
@@ -330,59 +366,23 @@ public class LensOverlayView extends FrameLayout {
             Rect wordBounds = CharacterBoundsCalculator.getWordBounds(
                     region.characterBounds,
                     charIndex,
-                    charIndex + word.text.length()
-            );
+                    charIndex + word.text.length());
 
-            if (wordBounds != null && tapX >= wordBounds.left && tapX <= wordBounds.right) {
+            if (wordBounds != null && bmpX >= wordBounds.left && bmpX <= wordBounds.right) {
                 return word;
             }
-
             charIndex += word.text.length();
         }
 
-        // If no specific word found, return first word with definition
         for (SegmentedWord word : region.segmentedWords) {
             if (word.entry != null) {
                 return word;
             }
         }
-
         return null;
     }
 
     private void showDefinitionPopup(DictionaryEntry entry, int x, int y) {
         definitionPopup.showEntry(entry, x, y);
-    }
-
-    private void handleRegularTextTap(TextRegion region) {
-        if (region.isSelected) {
-            // Second tap - copy to clipboard
-            copyToClipboard(region.text);
-            region.isSelected = false;
-            Toast.makeText(getContext(), "Copied: " + truncateText(region.text, 50),
-                    Toast.LENGTH_SHORT).show();
-        } else {
-            // First tap - select
-            // Deselect others
-            for (TextRegion r : textRegions) {
-                r.isSelected = false;
-            }
-            region.isSelected = true;
-            Toast.makeText(getContext(), "Tap again to copy",
-                    Toast.LENGTH_SHORT).show();
-        }
-        invalidate();
-    }
-
-    private void copyToClipboard(String text) {
-        ClipboardManager clipboard = (ClipboardManager)
-                getContext().getSystemService(Context.CLIPBOARD_SERVICE);
-        ClipData clip = ClipData.newPlainText("Lens Selection", text);
-        clipboard.setPrimaryClip(clip);
-    }
-
-    private String truncateText(String text, int maxLen) {
-        if (text.length() <= maxLen) return text;
-        return text.substring(0, maxLen) + "...";
     }
 }

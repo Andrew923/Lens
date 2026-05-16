@@ -22,10 +22,9 @@ public class LensSessionService extends VoiceInteractionSessionService {
 
 class LensSession extends VoiceInteractionSession {
     private static final String TAG = "LensSession";
-    private LensOverlayView overlayView;
+    private LensPagerView pagerView;
     private OcrScanner ocrScanner;
     private Handler handler = new Handler(Looper.getMainLooper());
-    private int yOffset = 0;
 
     public LensSession(Context context) {
         super(context);
@@ -34,18 +33,16 @@ class LensSession extends VoiceInteractionSession {
 
     @Override
     public View onCreateContentView() {
-        overlayView = new LensOverlayView(getContext());
-        overlayView.setOnDismissListener(() -> finish());
-        return overlayView;
+        pagerView = new LensPagerView(getContext());
+        pagerView.setOnDismissListener(() -> finish());
+        return pagerView;
     }
 
     @Override
     public void onShow(Bundle args, int showFlags) {
         super.onShow(args, showFlags);
-
-        // Show loading state
-        if (overlayView != null) {
-            overlayView.showLoading();
+        if (pagerView != null) {
+            pagerView.showLoading();
         }
     }
 
@@ -55,20 +52,11 @@ class LensSession extends VoiceInteractionSession {
             (screenshot != null ? screenshot.getWidth() + "x" + screenshot.getHeight() : "null"));
 
         if (screenshot != null) {
-            // Get status bar height from system resources
-            int statusBarHeight = 0;
-            int resourceId = getContext().getResources().getIdentifier("status_bar_height", "dimen", "android");
-            if (resourceId > 0) {
-                statusBarHeight = getContext().getResources().getDimensionPixelSize(resourceId);
-            }
-            yOffset = statusBarHeight;
-            Log.d(TAG, "Status bar height: " + yOffset);
-
             processScreenshot(screenshot);
         } else {
             handler.post(() -> {
-                if (overlayView != null) {
-                    overlayView.showError("No screenshot available");
+                if (pagerView != null) {
+                    pagerView.showError("No screenshot available");
                 }
             });
         }
@@ -77,52 +65,49 @@ class LensSession extends VoiceInteractionSession {
     private void processScreenshot(Bitmap screenshot) {
         if (screenshot == null) {
             handler.post(() -> {
-                if (overlayView != null) {
-                    overlayView.showError("Screenshot failed");
+                if (pagerView != null) {
+                    pagerView.showError("Screenshot failed");
                 }
             });
             return;
         }
 
-        // Pass negative offset if overlay starts below screen top
-        // OCR coordinates are in screenshot space, overlay is in screen space
-        // If overlay starts at y=100, we need to ADD 100 to OCR y coords (or pass -100 to subtract internally)
-        int adjustedOffset = -yOffset;
-        Log.d(TAG, "Using OCR offset: " + adjustedOffset);
-
-        ocrScanner.scanBitmap(screenshot, adjustedOffset, new OcrScanner.OcrCallback() {
+        // OCR coordinates stay in raw screenshot-bitmap space; the views own
+        // the bitmap->view transform, so the frozen screenshot and the boxes
+        // always align regardless of keyboard / status-bar state.
+        ocrScanner.scanBitmap(screenshot, new OcrScanner.OcrCallback() {
             @Override
             public void onOcrComplete(List<TextRegion> regions) {
-                // Enrich Chinese text with pinyin/definitions
                 if (regions != null && !regions.isEmpty()) {
                     new Thread(() -> {
                         ChineseTextEnricher enricher = new ChineseTextEnricher(getContext());
                         enricher.enrichRegions(regions);
 
                         handler.post(() -> {
-                            if (overlayView != null) {
-                                overlayView.displayTextRegions(regions);
+                            if (pagerView != null) {
+                                pagerView.setScreenshot(screenshot);
+                                pagerView.displayTextRegions(regions);
                             }
                         });
                     }).start();
                 } else {
                     handler.post(() -> {
-                        if (overlayView != null) {
-                            overlayView.displayTextRegions(regions != null ? regions : new ArrayList<>());
+                        if (pagerView != null) {
+                            pagerView.setScreenshot(screenshot);
+                            pagerView.displayTextRegions(
+                                    regions != null ? regions : new ArrayList<>());
                         }
                     });
                 }
-
-                // Recycle bitmap after OCR is done
-                screenshot.recycle();
+                // Bitmap is retained for the overlay background; recycled on
+                // session hide/destroy via pagerView.recycleScreenshot().
             }
 
             @Override
             public void onOcrError(Exception e) {
-                screenshot.recycle();
                 handler.post(() -> {
-                    if (overlayView != null) {
-                        overlayView.showError("OCR failed: " + e.getMessage());
+                    if (pagerView != null) {
+                        pagerView.showError("OCR failed: " + e.getMessage());
                     }
                 });
             }
@@ -133,12 +118,18 @@ class LensSession extends VoiceInteractionSession {
     public void onHide() {
         super.onHide();
         handler.removeCallbacksAndMessages(null);
+        if (pagerView != null) {
+            pagerView.recycleScreenshot();
+        }
     }
 
     @Override
     public void onDestroy() {
         super.onDestroy();
         handler.removeCallbacksAndMessages(null);
+        if (pagerView != null) {
+            pagerView.recycleScreenshot();
+        }
         if (ocrScanner != null) {
             ocrScanner.close();
         }

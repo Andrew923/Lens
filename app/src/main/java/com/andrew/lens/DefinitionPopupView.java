@@ -1,7 +1,5 @@
 package com.andrew.lens;
 
-import android.content.ClipData;
-import android.content.ClipboardManager;
 import android.content.Context;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -12,7 +10,6 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
-import android.widget.Toast;
 
 public class DefinitionPopupView extends FrameLayout {
     private TextView characterText;
@@ -101,15 +98,6 @@ public class DefinitionPopupView extends FrameLayout {
 
         container.addView(scrollView);
 
-        // Copy button
-        TextView copyButton = new TextView(getContext());
-        copyButton.setText("Copy");
-        copyButton.setTextSize(14);
-        copyButton.setTextColor(0xFF2196F3);
-        copyButton.setPadding(0, 16, 0, 0);
-        copyButton.setOnClickListener(v -> copyToClipboard());
-        container.addView(copyButton);
-
         addView(container);
     }
 
@@ -120,17 +108,21 @@ public class DefinitionPopupView extends FrameLayout {
     public void showEntry(DictionaryEntry entry, int targetX, int targetY) {
         this.currentEntry = entry;
 
-        characterText.setText(entry.simplified);
+        boolean useTraditional = Prefs.useTraditional(getContext());
+        String primary = useTraditional ? entry.traditional : entry.simplified;
+        String secondary = useTraditional ? entry.simplified : entry.traditional;
+        characterText.setText(primary);
 
-        // Show traditional if different from simplified
-        if (!entry.traditional.equals(entry.simplified)) {
-            traditionalText.setText("(" + entry.traditional + ")");
+        // Show the other form in parentheses when it differs
+        if (!secondary.equals(primary)) {
+            traditionalText.setText("(" + secondary + ")");
             traditionalText.setVisibility(VISIBLE);
         } else {
             traditionalText.setVisibility(GONE);
         }
 
-        pinyinText.setText(entry.pinyinDisplay);
+        pinyinText.setText(Prefs.pinyinToneMarks(getContext())
+                ? entry.pinyinDisplay : entry.pinyin);
 
         // Format definitions with bullets
         StringBuilder defText = new StringBuilder();
@@ -184,21 +176,5 @@ public class DefinitionPopupView extends FrameLayout {
 
     public boolean isShowing() {
         return getVisibility() == VISIBLE;
-    }
-
-    private void copyToClipboard() {
-        if (currentEntry == null) return;
-
-        String text = currentEntry.simplified + " [" + currentEntry.pinyinDisplay + "]\n";
-        for (String def : currentEntry.definitions) {
-            text += "• " + def + "\n";
-        }
-
-        ClipboardManager clipboard = (ClipboardManager)
-                getContext().getSystemService(Context.CLIPBOARD_SERVICE);
-        ClipData clip = ClipData.newPlainText("Lens Definition", text);
-        clipboard.setPrimaryClip(clip);
-
-        Toast.makeText(getContext(), "Copied to clipboard", Toast.LENGTH_SHORT).show();
     }
 }
